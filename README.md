@@ -97,7 +97,7 @@ curl -X POST http://localhost:8002/v1/audio/transcriptions \
 > **Sharing a GPU with TTS?**  
 > Start TTS first (fixed ~4.4 GB footprint), then ASR with `--gpu-memory-utilization 0.55`.  
 > vLLM auto-sizes its KV cache to whatever VRAM is left.  
-> See `docker-compose.yml` for the full orchestrated setup.
+> See [`docker-compose.yml`](docker-compose.yml) for the full orchestrated setup.
 
 ---
 
@@ -194,9 +194,9 @@ See [`docker-compose.yml`](docker-compose.yml) for VRAM budget, startup ordering
 
 | GPU | VRAM | Notes |
 |-----|------|-------|
-| NVIDIA GeForce RTX 5090 (Vast.ai VM) | 32 GB | Driver 580.95.05 / 595.58.03; two-pass benchmarks — see below |
-| NVIDIA GeForce RTX 4090 (Vast.ai VM) | 24 GB | Driver 580.126.09, CUDA 13.0; container starts and loads correctly |
-| NVIDIA GRID A100D-20C (Vultr vGPU) | 20 GB | Use `--gpu-memory-utilization 0.55` when co-located with TTS |
+| NVIDIA GeForce RTX 5090 (Vast.ai VM) | 32 GB | Driver 580.95.05 / 595.58.03 (CUDA 13.0 / 13.2); three-pass benchmarks — see below |
+| NVIDIA GeForce RTX 4090 (Vast.ai VM) | 24 GB | Driver 580.126.09 (CUDA 13.0); container starts and loads correctly |
+| NVIDIA GRID A100D-20C (Vultr vGPU) | 20 GB | Driver 550.90.07 (CUDA ≤ 12.4); use `--gpu-memory-utilization 0.55` when co-located with TTS |
 
 ### VRAM budget (16 GB, TTS + ASR on same GPU)
 
@@ -239,7 +239,7 @@ espeak-ng speech at 16 kHz mono — steady-state (warm model, 5 runs averaged).*
 > bare-metal; the cu128-based container is required — CUDA 13.x containers will
 > fail with Error 803 on driver 550.
 
-### Performance (RTX 5090, vLLM + fp8 — two-pass driver comparison)
+### Performance (RTX 5090, vLLM + fp8 — three-pass driver comparison)
 
 *Measured on Vast.ai NVIDIA GeForce RTX 5090 (32 GB VRAM, Blackwell sm_12.0),
 Ubuntu 22.04 VM, vLLM 0.14.0 — steady-state (5 runs averaged, first warmup run excluded).
