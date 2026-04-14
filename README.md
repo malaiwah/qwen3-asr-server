@@ -242,22 +242,28 @@ espeak-ng speech at 16 kHz mono — steady-state (warm model, 5 runs averaged).*
 ### Performance (RTX 5090, vLLM + fp8 — two-pass driver comparison)
 
 *Measured on Vast.ai NVIDIA GeForce RTX 5090 (32 GB VRAM, Blackwell sm_12.0),
-Ubuntu 22.04 VM, vLLM 0.14.0 — steady-state (4 runs averaged per pass).
+Ubuntu 22.04 VM, vLLM 0.14.0 — steady-state (5 runs averaged, first warmup run excluded).
 ASR WAV files synthesised by qwen3-tts-server on the same machine.*
 
 | Pass | Driver | CUDA compat | Short (4.2 s) | Short RTF | Long (30.6 s) | Long RTF |
 |------|--------|-------------|--------------|-----------|--------------|----------|
 | 1 (stock) | 580.95.05 | 13.0 | **66 ms** | **64×** | **381 ms** | **80×** |
 | 2 (upgraded) | 595.58.03 | 13.2 | 134 ms | 32× | 822 ms | 37× |
+| 3 (cache cleared, uncontested recompile) | 595.58.03 | 13.2 | **67 ms** | **64×** | **382 ms** | **80×** |
 
-**Pass 1 is ~2× faster.** The driver upgrade changed vLLM's inductor compile-cache
+**Pass 2 is ~2× slower than Pass 1.** The driver upgrade changed vLLM's inductor compile-cache
 hash (`fb51a9fd39` → `e78daa734f`), forcing a fresh kernel benchmark that selected
-a slower combination of combo-kernels under concurrent load. TTS performance was
-**unaffected** by the driver upgrade (see qwen3-tts-server benchmarks).
+a slower combination of combo-kernels under concurrent load (TTS competing for GPU).
+TTS performance was **unaffected** by the driver upgrade (see qwen3-tts-server benchmarks).
+
+**Pass 3 confirms full recovery.** After clearing the compile cache and restarting ASR
+alone (no TTS competition), vLLM recompiled in 3.5 s and selected the same fast kernel
+combination as Pass 1 — returning to identical steady-state performance.
 
 > **Practical note**: if you upgrade the host driver, delete
 > `/root/.cache/vllm/torch_compile_cache/` inside the container and let vLLM
-> recompile uncontested on first startup — this should recover Pass 1 speeds.
+> recompile uncontested on first startup — this fully recovers Pass 1 speeds
+> (verified: 67 ms / 64× RTF short, 382 ms / 80× RTF long on driver 595.58.03).
 
 Round-trip (TTS → WAV → ASR): **1 380 ms** end-to-end for an 8-word sentence.
 
