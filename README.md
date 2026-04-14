@@ -16,7 +16,7 @@ Built for low-latency conversational voice agents — runs comfortably alongside
 - 🌍 **52 languages** — English, French, Chinese, Japanese, Korean, Spanish, German, Italian, Arabic, …
 - ⚡ vLLM backend with **fp8 KV cache** + prefix caching → ~250 ms for 5 s clip
 - 🧰 Drop-in Whisper replacement — same API, just change the base URL
-- 🐳 Single-container deploy, Ubuntu 24.04
+- 🐳 Single-container deploy, Ubuntu 24.04, CUDA 12.8 (driver ≥ 520)
 - 🐌 CPU fallback (`--cpu`) for smoke tests
 
 ---

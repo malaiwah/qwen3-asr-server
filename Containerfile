@@ -1,19 +1,19 @@
 # Qwen3-ASR server
 #
-# Base: CUDA 13.2 + Ubuntu 24.04
-#   vLLM (qwen-asr[vllm]) supports CUDA 12.x and 13.x
-#   This image requires NVIDIA driver ≥ 570 (CUDA 13.2 runtime).
+# Base: CUDA 12.8 + Ubuntu 24.04
+#   vLLM (qwen-asr[vllm]) installs cu12x torch wheels via pip, so the
+#   container CUDA runtime is 12.x regardless of base image version.
+#   Using cu128 base gives the widest driver compatibility (≥ 520).
 #
-#   If your driver is older (e.g. 550 = CUDA 12.4 max), use the companion
-#   TTS image's approach: swap to nvidia/cuda:12.8.0-devel-ubuntu24.04
-#   and install vLLM with the matching cu128 torch wheels.
+#   CUDA 13.x base was tried but requires driver ≥ 570 which excludes
+#   vGPU instances and many cloud machines still on driver 550/12.4.
 #
 # Architecture: server.py proxies all requests to qwen-asr-serve (vLLM)
 # on an internal port and strips the "language X\n" prefix from responses.
 # Extra flags (--gpu-memory-utilization, --kv-cache-dtype, …) are forwarded
 # to vLLM at runtime.
 
-FROM docker.io/nvidia/cuda:13.2.0-devel-ubuntu24.04
+FROM docker.io/nvidia/cuda:12.8.0-devel-ubuntu24.04
 
 WORKDIR /app
 
