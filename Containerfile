@@ -30,7 +30,7 @@ RUN pip install --upgrade pip numpy
 #   qwen-asr[vllm]  → vLLM-backed production server (GPU mode)
 #   transformers    → CPU fallback loaded on demand via --cpu
 #   httpx           → async proxy client used by server.py
-RUN pip install --no-cache-dir "qwen-asr[vllm]" fastapi uvicorn soundfile httpx
+RUN pip install --no-cache-dir "qwen-asr[vllm]" fastapi uvicorn soundfile httpx prometheus-client
 
 # HuggingFace weight cache
 ENV HF_HOME=/root/.cache/huggingface

@@ -27,7 +27,7 @@ jobs:
 
       - name: Install test dependencies (no GPU needed)
         run: |
-          pip install fastapi uvicorn soundfile numpy httpx pytest
+          pip install fastapi uvicorn soundfile numpy httpx pytest prometheus-client
 
       - name: Run smoke tests
         run: pytest -q tests/

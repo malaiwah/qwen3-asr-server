@@ -47,10 +47,19 @@ from typing import Optional
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 
 MODEL_ID = os.getenv("QWEN3_ASR_MODEL_ID", "Qwen/Qwen3-ASR-1.7B")
+
+# Optional bearer-token auth.  Empty/None disables auth entirely.
+_API_KEY: str = os.getenv("QWEN_API_KEY", "") or ""
+
+# Paths exempt from auth (standard ops endpoints + OpenAPI docs).
+_AUTH_EXEMPT_PATHS = frozenset({
+    "/", "/health", "/metrics",
+    "/docs", "/redoc", "/openapi.json",
+})
 
 # Internal port for the vLLM subprocess — never exposed to callers.
 _VLLM_INTERNAL_PORT = 18000
@@ -299,21 +308,129 @@ async def _proxy(
 
 
 # -----------------------------------------------------------------------
+# Prometheus metrics (in-process, no external deps beyond prometheus_client)
+# -----------------------------------------------------------------------
+
+try:
+    from prometheus_client import (
+        CONTENT_TYPE_LATEST,
+        Counter,
+        Gauge,
+        Histogram,
+        generate_latest,
+    )
+    _METRICS_AVAILABLE = True
+except ImportError:  # pragma: no cover — prometheus_client is a hard dep in prod
+    _METRICS_AVAILABLE = False
+
+if _METRICS_AVAILABLE:
+    _M_REQUESTS = Counter(
+        "qwen3_asr_requests_total",
+        "Total HTTP requests handled by qwen3-asr-server.",
+        ["method", "path", "status"],
+    )
+    _M_LATENCY = Histogram(
+        "qwen3_asr_request_duration_seconds",
+        "HTTP request latency (wall clock, seconds).",
+        ["method", "path"],
+        buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0),
+    )
+    _M_INFLIGHT = Gauge(
+        "qwen3_asr_requests_in_flight",
+        "HTTP requests currently being processed.",
+    )
+    _M_MODEL_READY = Gauge(
+        "qwen3_asr_model_ready",
+        "1 if the backend is fully initialised and ready to serve, else 0.",
+    )
+    _M_BACKEND_INFO = Gauge(
+        "qwen3_asr_backend_info",
+        "Backend descriptor (value is always 1; dimensions in labels).",
+        ["device", "model_id"],
+    )
+
+
+def _route_template(request: Request) -> str:
+    """Return the registered route template for a request (low-cardinality label)."""
+    route = request.scope.get("route")
+    if route is not None and hasattr(route, "path"):
+        return route.path
+    return request.url.path
+
+
+# -----------------------------------------------------------------------
 # FastAPI application
 # -----------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if _METRICS_AVAILABLE:
+        _M_MODEL_READY.set(0)
+        _M_BACKEND_INFO.labels(device=_DEVICE, model_id=MODEL_ID).set(1)
     if _DEVICE == "cpu":
         await asyncio.to_thread(_load_model_cpu)
     else:
         await _start_vllm()
+    if _METRICS_AVAILABLE:
+        _M_MODEL_READY.set(1 if _model_ready else 0)
     yield
+    if _METRICS_AVAILABLE:
+        _M_MODEL_READY.set(0)
     if _DEVICE != "cpu":
         _stop_vllm()
 
 
 app = FastAPI(title="Qwen3-ASR", lifespan=lifespan)
+
+
+# -----------------------------------------------------------------------
+# Auth + metrics middleware
+# -----------------------------------------------------------------------
+
+@app.middleware("http")
+async def _auth_and_metrics(request: Request, call_next):
+    path = request.url.path
+
+    # Bearer-token auth (enabled when QWEN_API_KEY / --api-key is set).
+    if _API_KEY and path not in _AUTH_EXEMPT_PATHS:
+        auth = request.headers.get("authorization", "")
+        expected = f"Bearer {_API_KEY}"
+        if auth != expected:
+            return JSONResponse(
+                {"error": {"message": "Invalid or missing API key.", "type": "invalid_request_error", "code": "invalid_api_key"}},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+    if not _METRICS_AVAILABLE:
+        return await call_next(request)
+
+    t0 = time.perf_counter()
+    _M_INFLIGHT.inc()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        _M_INFLIGHT.dec()
+        template = _route_template(request)
+        elapsed = time.perf_counter() - t0
+        _M_LATENCY.labels(method=request.method, path=template).observe(elapsed)
+        _M_REQUESTS.labels(method=request.method, path=template, status=str(status_code)).inc()
+
+
+@app.get("/metrics")
+async def metrics_endpoint() -> Response:
+    """Prometheus exposition endpoint.  Not authenticated (standard ops practice)."""
+    if not _METRICS_AVAILABLE:
+        return PlainTextResponse(
+            "# prometheus_client not installed\n",
+            status_code=501,
+        )
+    # Refresh model-readiness gauge at scrape time (cheap).
+    _M_MODEL_READY.set(1 if _model_ready else 0)
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 # -----------------------------------------------------------------------
@@ -517,10 +634,21 @@ GPU sharing with qwen3-tts-server (16 GB card):
         action="store_true",
         help="Force CPU mode (transformers). Very slow — smoke tests only.",
     )
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help="Require 'Authorization: Bearer <key>' on /v1/* endpoints. "
+             "Overrides the QWEN_API_KEY env var when provided. "
+             "/health and /metrics remain unauthenticated.",
+    )
     parser.add_argument("--log-level", default="info")
     args, extra = parser.parse_known_args()
 
-    global _DEVICE, _vllm_extra_args
+    global _DEVICE, _vllm_extra_args, _API_KEY
+    if args.api_key is not None:
+        _API_KEY = args.api_key
+    if _API_KEY:
+        logger.info("API-key auth enabled — /v1/* endpoints require 'Authorization: Bearer <key>'.")
 
     gpu_available = False
     if not args.cpu:

@@ -315,6 +315,46 @@ Returns standard chat completion JSON.  Requires GPU / vLLM backend.
 
 Standard introspection.  `/health` reflects actual vLLM readiness.
 
+### `GET /metrics` — Prometheus exposition
+
+Plain-text Prometheus exposition for scraping by Prometheus/VictoriaMetrics/OTEL collectors.
+Always unauthenticated (standard ops convention).  Exposed metrics:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `qwen3_asr_requests_total` | counter | `method, path, status` | HTTP requests handled |
+| `qwen3_asr_request_duration_seconds` | histogram | `method, path` | Request latency |
+| `qwen3_asr_requests_in_flight` | gauge | — | Requests currently in progress |
+| `qwen3_asr_model_ready` | gauge | — | 1 when vLLM is ready, 0 otherwise |
+| `qwen3_asr_backend_info` | gauge | `device, model_id` | Always 1; labels describe the backend |
+
+Standard `process_*` and `python_gc_*` metrics are included automatically by
+`prometheus_client`.
+
+---
+
+## Authentication (optional)
+
+By default the server is unauthenticated (matching typical self-hosted usage).
+To require a bearer token on `/v1/*` endpoints set either an env var or a CLI flag:
+
+```bash
+# Env var (recommended for containers)
+docker run -e QWEN_API_KEY=sk-mysecret ghcr.io/malaiwah/qwen3-asr-server:latest …
+
+# Or CLI flag
+python server.py --api-key sk-mysecret
+```
+
+Callers must then send `Authorization: Bearer sk-mysecret`.
+`/health` and `/metrics` stay unauthenticated regardless, so ops scrapers and
+container health checks keep working.
+
+```python
+from openai import OpenAI
+client = OpenAI(api_key="sk-mysecret", base_url="http://localhost:8002/v1")
+```
+
 ---
 
 ## Configuration
@@ -324,17 +364,34 @@ Standard introspection.  `/health` reflects actual vLLM readiness.
 | `QWEN3_ASR_MODEL_ID` | `Qwen/Qwen3-ASR-1.7B` | Override the HF model |
 | `HF_HOME` | `/root/.cache/huggingface` | Weight cache. **Mount a volume here.** |
 | `HF_TOKEN` | *(unset)* | HuggingFace token for gated downloads |
+| `QWEN_API_KEY` | *(unset)* | Require `Authorization: Bearer <key>` on `/v1/*` |
 
 CLI flags (forwarded to vLLM in GPU mode):
 
 | Flag | Default | Purpose |
 |---|---|---|
 | `--host` / `--port` | `0.0.0.0` / `8000` | Listener |
+| `--api-key` | *(env / off)* | Overrides `QWEN_API_KEY` for bearer-token auth |
 | `--gpu-memory-utilization` | `0.9` | **Lower to 0.55** when sharing GPU with TTS |
 | `--max-model-len` | `4096` | Context window |
 | `--kv-cache-dtype` | *(vLLM default)* | `fp8` recommended — halves KV VRAM |
 | `--max-num-seqs` | *(vLLM default)* | Concurrent requests |
 | `--cpu` | *(off)* | Force transformers fallback (very slow) |
+
+---
+
+## Benchmarking
+
+A standalone `benchmark.py` measures steady-state wall-clock latency + RTF:
+
+```bash
+./benchmark.py short.wav long.wav --runs 5
+./benchmark.py audio.wav --url http://my-gpu-host:8002 --api-key sk-mysecret
+```
+
+First run per file is warmup (excluded from the average); the rest feed a simple
+mean ± stdev.  The RTX 4080 SUPER / 5090 numbers in the tables above were
+produced with this script.
 
 ---
 

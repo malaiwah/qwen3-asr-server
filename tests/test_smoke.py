@@ -145,3 +145,65 @@ def test_health_payload_when_starting():
     assert "backend" in payload
     assert "status" in payload
     assert payload["model_ready"] is False
+
+
+# -----------------------------------------------------------------------
+# Metrics endpoint and auth middleware (in-process via TestClient)
+# -----------------------------------------------------------------------
+
+def test_metrics_endpoint_exposed_without_auth():
+    from fastapi.testclient import TestClient
+    server = _import_server()
+    # Ensure auth is off for this test.
+    original = server._API_KEY
+    server._API_KEY = ""
+    try:
+        # lifespan is skipped with context-managerless TestClient usage below.
+        client = TestClient(server.app)
+        r = client.get("/metrics")
+        assert r.status_code == 200
+        body = r.text
+        # Core metrics should be registered even before any request lands.
+        assert "qwen3_asr_requests_total" in body or "qwen3_asr_request_duration_seconds" in body
+        assert "qwen3_asr_model_ready" in body
+    finally:
+        server._API_KEY = original
+
+
+def test_auth_blocks_v1_when_key_set():
+    from fastapi.testclient import TestClient
+    server = _import_server()
+    original = server._API_KEY
+    server._API_KEY = "secret-key"
+    try:
+        client = TestClient(server.app)
+        # Missing header → 401
+        r = client.get("/v1/models")
+        assert r.status_code == 401
+        # Wrong key → 401
+        r = client.get("/v1/models", headers={"Authorization": "Bearer nope"})
+        assert r.status_code == 401
+        # Correct key → passes auth (endpoint itself returns 200)
+        r = client.get("/v1/models", headers={"Authorization": "Bearer secret-key"})
+        assert r.status_code == 200
+        # Health stays unauthenticated even with a key set
+        r = client.get("/health")
+        assert r.status_code == 200
+        # Metrics stays unauthenticated
+        r = client.get("/metrics")
+        assert r.status_code == 200
+    finally:
+        server._API_KEY = original
+
+
+def test_auth_disabled_when_no_key():
+    from fastapi.testclient import TestClient
+    server = _import_server()
+    original = server._API_KEY
+    server._API_KEY = ""
+    try:
+        client = TestClient(server.app)
+        r = client.get("/v1/models")
+        assert r.status_code == 200
+    finally:
+        server._API_KEY = original
