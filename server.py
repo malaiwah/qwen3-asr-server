@@ -338,8 +338,22 @@ async def transcribe(request: Request):
         raise HTTPException(503, "Model is still loading. Check /health and retry.")
 
     if _DEVICE != "cpu":
-        return await _proxy(request, "/v1/audio/transcriptions",
-                            post_process_json=_clean_transcription)
+        # Peek at response_format before proxying.  Starlette caches the body
+        # after the first read, so request.body() inside _proxy still works.
+        form = await request.form()
+        response_format = (form.get("response_format") or "json").lower()
+
+        proxy_result = await _proxy(request, "/v1/audio/transcriptions",
+                                    post_process_json=_clean_transcription)
+
+        # vLLM always returns JSON; reformat to plain text when requested.
+        if response_format == "text" and proxy_result.status_code == 200:
+            try:
+                data = json.loads(proxy_result.body)
+                return Response(content=data.get("text", ""), media_type="text/plain")
+            except Exception:
+                pass
+        return proxy_result
 
     # CPU path
     form = await request.form()

@@ -120,6 +120,19 @@ def test_routes_registered():
 
 
 # -----------------------------------------------------------------------
+# _clean_transcription covers response_format=text reformat logic
+# (the actual HTTP reformat runs in the endpoint; unit-test the helper)
+# -----------------------------------------------------------------------
+
+def test_clean_transcription_text_field_present():
+    server = _import_server()
+    data = {"text": "language English<asr_text>Hello", "usage": {"type": "duration", "seconds": 3}}
+    result = server._clean_transcription(data)
+    assert result["text"] == "Hello"
+    assert "usage" in result  # non-text fields preserved
+
+
+# -----------------------------------------------------------------------
 # Health endpoint (no model loaded)
 # -----------------------------------------------------------------------
 
