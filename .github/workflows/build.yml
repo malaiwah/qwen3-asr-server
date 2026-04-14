@@ -41,6 +41,12 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Required for github/codeql-action/upload-sarif (Trivy findings →
+      # GitHub Security tab).
+      security-events: write
+      # Required by some attestation/provenance flows.
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout
@@ -76,6 +82,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -85,3 +92,38 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # SBOM (SPDX) + SLSA build provenance as in-toto attestations on GHCR.
+          # Inspect with:
+          #   docker buildx imagetools inspect \
+          #     --format '{{ json .SBOM }}' ghcr.io/<org>/<image>:latest
+          sbom: true
+          provenance: mode=max
+
+      # ----------------------------------------------------------------
+      # Vulnerability scan (Trivy) — CRITICAL/HIGH only, ignore unfixed.
+      # Results uploaded to GitHub Security tab as SARIF.  Non-blocking:
+      # we surface findings without failing the build (upstream CUDA base
+      # images routinely carry known CVEs we can't patch ourselves).
+      # ----------------------------------------------------------------
+      - name: Trivy vulnerability scan
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@0.35.0
+        env:
+          # Authenticated pulls of the trivy-db from ghcr.io avoid public
+          # rate limits that occasionally fail CI.
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"
+
+      - name: Upload Trivy SARIF to GitHub Security
+        if: always() && github.event_name != 'pull_request' && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-container
