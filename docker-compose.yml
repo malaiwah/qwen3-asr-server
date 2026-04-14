@@ -1,0 +1,97 @@
+# qwen3-tts-server + qwen3-asr-server — complete voice loop stack
+#
+# Usage:
+#   HF_TOKEN=hf_xxx docker compose up -d
+#
+# GPU memory budget (16 GB card, e.g. RTX 4080 SUPER):
+#   TTS (bfloat16 + CUDA graphs):  ~4.4 GB
+#   ASR (fp8 KV cache, vLLM):     ~10.4 GB
+#   Total:                         ~14.8 GB / 16 GB  (~90%)
+#
+# For smaller cards (< 16 GB) or shared vGPU slices:
+#   Lower ASR --gpu-memory-utilization further (e.g. 0.40 for a 12 GB card).
+#   Keep TTS first — it has a fixed footprint; ASR vLLM auto-sizes to what's left.
+#
+# Ports:
+#   TTS: http://localhost:8001
+#   ASR: http://localhost:8002
+
+services:
+  tts:
+    image: ghcr.io/malaiwah/qwen3-tts-server:latest
+    container_name: qwen3-tts
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ports:
+      - "8001:8001"
+    volumes:
+      - qwen3-hf-cache:/root/.cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HOME=/root/.cache/huggingface
+    healthcheck:
+      test: >
+        python3 -c "import urllib.request,json,sys;
+        d=json.loads(urllib.request.urlopen('http://localhost:8001/health').read());
+        sys.exit(0 if d['model_ready'] else 1)"
+      interval: 30s
+      timeout: 10s
+      start_period: 180s
+      retries: 5
+
+  asr:
+    image: ghcr.io/malaiwah/qwen3-asr-server:latest
+    container_name: qwen3-asr
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ports:
+      - "8002:8000"
+    volumes:
+      - qwen3-hf-cache:/root/.cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HOME=/root/.cache/huggingface
+    # Start after TTS is healthy — TTS has a fixed VRAM footprint;
+    # vLLM auto-sizes its KV cache to whatever is left on the GPU.
+    depends_on:
+      tts:
+        condition: service_healthy
+    command:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --gpu-memory-utilization
+      - "0.55"   # tuned for 16 GB card sharing with TTS; raise to 0.65 if TTS is not running
+      - --max-model-len
+      - "4096"
+      - --kv-cache-dtype
+      - fp8
+      - --max-num-seqs
+      - "4"
+    healthcheck:
+      test: >
+        python3 -c "import urllib.request,json,sys;
+        d=json.loads(urllib.request.urlopen('http://localhost:8000/health').read());
+        sys.exit(0 if d['model_ready'] else 1)"
+      interval: 30s
+      timeout: 10s
+      start_period: 240s
+      retries: 6
+
+volumes:
+  qwen3-hf-cache:
+    # Shared HuggingFace model cache — weights are downloaded once and reused
+    # across container restarts and image upgrades.
