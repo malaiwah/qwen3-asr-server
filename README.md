@@ -220,12 +220,18 @@ RTX 4080 SUPER:                       16,376 MiB
 
 ### Performance (GRID A100D-20C vGPU)
 
-| Workload | Wall time |
-|---|---|
-| 5 s mono WAV | ~400 ms |
-| 30 s mono WAV | ~900 ms |
+*Measured on Vultr GRID A100D-20C (20 GB vGPU), driver 550.90.07, CUDA 12.4,
+container `ghcr.io/malaiwah/qwen3-asr-server:latest` (cu128 base, vLLM backend),
+espeak-ng speech at 16 kHz mono — steady-state (warm model, 5 runs averaged).*
 
-The vGPU adds hypervisor overhead; absolute latency is higher but RTF is still excellent.
+| Workload | Audio duration | Wall time | Real-time factor |
+|---|---|---|---|
+| Short speech | 4.3 s | **~243 ms** | ~17× |
+| Long speech | 30.6 s | **~1270 ms** | ~24× |
+
+> The vGPU hypervisor (driver 550 / CUDA 12.4) adds some overhead compared to
+> bare-metal; the cu128-based container is required — CUDA 13.x containers will
+> fail with Error 803 on driver 550.
 
 ---
 

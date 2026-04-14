@@ -56,6 +56,14 @@ def test_strip_language_prefix_case_insensitive():
     assert server._strip_language_prefix("Language English\nHello") == "Hello"
 
 
+def test_strip_language_prefix_asr_text_tag():
+    server = _import_server()
+    # Newer vLLM / qwen-asr versions use <asr_text> as separator instead of \n
+    assert server._strip_language_prefix("language English<asr_text>Hello world") == "Hello world"
+    assert server._strip_language_prefix("language French<asr_text>Bonjour") == "Bonjour"
+    assert server._strip_language_prefix("language Chinese<asr_text>你好") == "你好"
+
+
 def test_strip_language_prefix_noop():
     server = _import_server()
     # Text without prefix should pass through unchanged

@@ -56,8 +56,13 @@ MODEL_ID = os.getenv("QWEN3_ASR_MODEL_ID", "Qwen/Qwen3-ASR-1.7B")
 _VLLM_INTERNAL_PORT = 18000
 _VLLM_BASE_URL = f"http://127.0.0.1:{_VLLM_INTERNAL_PORT}"
 
-# Strips "language English\n", "language French,\n", etc. from ASR output.
-_LANG_PREFIX_RE = re.compile(r"^language\s+\S+[,\s]*\n", re.IGNORECASE)
+# Strips language prefix from ASR output.  Qwen3-ASR prepends one of:
+#   "language English\n"        (older vLLM / qwen-asr versions)
+#   "language English<asr_text>" (newer versions use XML-style tag separator)
+# Both forms are matched and removed.
+_LANG_PREFIX_RE = re.compile(
+    r"^language\s+\S+[,\s]*(?:\n|<asr_text>)", re.IGNORECASE
+)
 
 logging.basicConfig(
     level=logging.INFO,
