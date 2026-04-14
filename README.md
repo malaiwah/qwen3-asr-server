@@ -194,6 +194,7 @@ See [`docker-compose.yml`](docker-compose.yml) for VRAM budget, startup ordering
 
 | GPU | VRAM | Notes |
 |-----|------|-------|
+| NVIDIA GeForce RTX 4090 (Vast.ai VM) | 24 GB | Driver 580.126.09, CUDA 13.0; container starts and loads correctly |
 | NVIDIA GRID A100D-20C (Vultr vGPU) | 20 GB | Use `--gpu-memory-utilization 0.55` when co-located with TTS |
 
 ### VRAM budget (16 GB, TTS + ASR on same GPU)
@@ -207,6 +208,9 @@ RTX 4080 SUPER:                       16,376 MiB
     - CUDA graphs + overhead:          1,400 MiB
   Total:                              ~14,800 MiB / ~90%
 ```
+
+On an RTX 4090 (24 GB) both models fit with headroom to spare; use the defaults
+(`--gpu-memory-utilization 0.65`) and let vLLM claim a large KV cache.
 
 **Start order matters**: TTS first (fixed footprint), then ASR — vLLM auto-sizes KV cache.
 
