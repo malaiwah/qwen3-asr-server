@@ -194,6 +194,7 @@ See [`docker-compose.yml`](docker-compose.yml) for VRAM budget, startup ordering
 
 | GPU | VRAM | Notes |
 |-----|------|-------|
+| NVIDIA GeForce RTX 5090 (Vast.ai VM) | 32 GB | Driver 580.95.05 / 595.58.03; two-pass benchmarks — see below |
 | NVIDIA GeForce RTX 4090 (Vast.ai VM) | 24 GB | Driver 580.126.09, CUDA 13.0; container starts and loads correctly |
 | NVIDIA GRID A100D-20C (Vultr vGPU) | 20 GB | Use `--gpu-memory-utilization 0.55` when co-located with TTS |
 
@@ -209,8 +210,9 @@ RTX 4080 SUPER:                       16,376 MiB
   Total:                              ~14,800 MiB / ~90%
 ```
 
-On an RTX 4090 (24 GB) both models fit with headroom to spare; use the defaults
-(`--gpu-memory-utilization 0.65`) and let vLLM claim a large KV cache.
+On an RTX 4090 (24 GB) or RTX 5090 (32 GB) both models fit with headroom to spare; use the
+defaults (`--gpu-memory-utilization 0.65`) and let vLLM claim a large KV cache.
+Measured RTX 5090 co-located footprint: **~28 GB / 32 GB** (TTS 4.4 GB + ASR 23.5 GB).
 
 **Start order matters**: TTS first (fixed footprint), then ASR — vLLM auto-sizes KV cache.
 
@@ -236,6 +238,28 @@ espeak-ng speech at 16 kHz mono — steady-state (warm model, 5 runs averaged).*
 > The vGPU hypervisor (driver 550 / CUDA 12.4) adds some overhead compared to
 > bare-metal; the cu128-based container is required — CUDA 13.x containers will
 > fail with Error 803 on driver 550.
+
+### Performance (RTX 5090, vLLM + fp8 — two-pass driver comparison)
+
+*Measured on Vast.ai NVIDIA GeForce RTX 5090 (32 GB VRAM, Blackwell sm_12.0),
+Ubuntu 22.04 VM, vLLM 0.14.0 — steady-state (4 runs averaged per pass).
+ASR WAV files synthesised by qwen3-tts-server on the same machine.*
+
+| Pass | Driver | CUDA compat | Short (4.2 s) | Short RTF | Long (30.6 s) | Long RTF |
+|------|--------|-------------|--------------|-----------|--------------|----------|
+| 1 (stock) | 580.95.05 | 13.0 | **66 ms** | **64×** | **381 ms** | **80×** |
+| 2 (upgraded) | 595.58.03 | 13.2 | 134 ms | 32× | 822 ms | 37× |
+
+**Pass 1 is ~2× faster.** The driver upgrade changed vLLM's inductor compile-cache
+hash (`fb51a9fd39` → `e78daa734f`), forcing a fresh kernel benchmark that selected
+a slower combination of combo-kernels under concurrent load. TTS performance was
+**unaffected** by the driver upgrade (see qwen3-tts-server benchmarks).
+
+> **Practical note**: if you upgrade the host driver, delete
+> `/root/.cache/vllm/torch_compile_cache/` inside the container and let vLLM
+> recompile uncontested on first startup — this should recover Pass 1 speeds.
+
+Round-trip (TTS → WAV → ASR): **1 380 ms** end-to-end for an 8-word sentence.
 
 ---
 
