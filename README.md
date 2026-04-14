@@ -1,31 +1,43 @@
 # qwen3-asr-server
 
-OpenAI-compatible HTTP server for [**Qwen3-ASR-1.7B**](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) (Whisper-style speech-to-text) with **vLLM acceleration**, **fp8 KV cache**, and **context-primed transcription** for vocabulary biasing.
+OpenAI-compatible HTTP server for [**Qwen3-ASR-1.7B**](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) (Whisper-style speech-to-text) with **vLLM acceleration**, **fp8 KV cache**, **context-primed transcription**, and clean text output (language prefix auto-stripped).
 
 Built for low-latency conversational voice agents — runs comfortably alongside a TTS model on a single 16 GB GPU and supports **52 languages**.
 
-> Companion project: [**qwen3-tts-server**](https://github.com/malaiwah/qwen3-tts-server) — the matching text-to-speech server. Together they form a complete voice loop: text → TTS → audio → ASR → text.
+> Companion project: [**qwen3-tts-server**](https://github.com/malaiwah/qwen3-tts-server) — the matching text-to-speech server. Together they form a complete voice loop.
 
 ---
 
 ## What you get
 
-- 🎙️ `/v1/audio/transcriptions` — Whisper-compatible single-shot transcription
-- 🧠 `/v1/chat/completions` — context-primed transcription via `input_audio` content parts (system prompt steers vocabulary, languages, named entities)
-- 🌍 **52 languages** — including English, French, Chinese, Japanese, Korean, Spanish, German, Italian, Portuguese, Arabic, …
-- ⚡ vLLM backend with **fp8 KV cache** + prefix caching → low latency, high throughput
-- 🧰 OpenAI-compatible — drop into Whisper clients with just a base URL change
-- 🐳 Single-container deploy with HuggingFace cache volume
-- 🐌 CPU fallback (`--cpu`) for smoke tests / no-GPU environments
+- 🎙️ `/v1/audio/transcriptions` — Whisper-compatible transcription (clean output, no `language X\n` prefix)
+- 🔄 `/v1/audio/translations` — API-compatible shim (transcribes in detected language; see note below)
+- 🧠 `/v1/chat/completions` — context-primed transcription via `input_audio` parts (vocabulary biasing)
+- 🌍 **52 languages** — English, French, Chinese, Japanese, Korean, Spanish, German, Italian, Arabic, …
+- ⚡ vLLM backend with **fp8 KV cache** + prefix caching → ~250 ms for 5 s clip
+- 🧰 Drop-in Whisper replacement — same API, just change the base URL
+- 🐳 Single-container deploy, Ubuntu 24.04
+- 🐌 CPU fallback (`--cpu`) for smoke tests
+
+---
+
+## Architecture: proxy, not execv
+
+Previous versions used `os.execv` to hand off to `qwen-asr-serve`, which prevented any response post-processing.  The server now starts vLLM as a subprocess on an internal port and proxies all requests through — enabling:
+
+- **Language prefix stripping**: Qwen3-ASR internally prepends `language English\n` (or `language French\n`, …) to every response.  The server strips this before returning.
+- **Proper `/health` endpoint** that reflects actual model readiness.
+- **Clean `/v1/audio/translations` shim** for Whisper API compatibility.
+- **Extra CLI flags forwarded to vLLM** (`--gpu-memory-utilization`, `--kv-cache-dtype`, etc.)
 
 ---
 
 ## Quickstart (Docker / Podman)
 
 ```bash
-# 1. Run the container — mount a volume for the HF model cache (~4 GB once cached)
-podman run -d --name qwen3-asr \
-  --device nvidia.com/gpu=all \
+# 1. Run the container
+docker run -d --name qwen3-asr \
+  --gpus all \
   -p 8002:8000 \
   -v qwen3-hf-cache:/root/.cache/huggingface \
   ghcr.io/malaiwah/qwen3-asr-server:latest \
@@ -35,20 +47,25 @@ podman run -d --name qwen3-asr \
   --max-num-seqs 4 \
   --kv-cache-dtype fp8
 
-# (Optional) supply a HuggingFace token if you've gated your downloads
-#   -e HF_TOKEN=hf_xxx
+# Podman equivalent:
+# podman run -d --name qwen3-asr \
+#   --device nvidia.com/gpu=all \
+#   ...
 
-# 2. Watch it warm up
-podman logs -f qwen3-asr   # look for "Application startup complete"
+# 2. Watch startup
+docker logs -f qwen3-asr   # look for "✓ vLLM backend ready"
 
-# 3. Try it
+# 3. Transcribe
 curl -X POST http://localhost:8002/v1/audio/transcriptions \
   -F model=Qwen/Qwen3-ASR-1.7B \
   -F file=@my-recording.wav
 # → {"text": "Hello from Qwen3."}
 ```
 
-> **Sharing a 16 GB GPU with TTS?** Tune `--gpu-memory-utilization 0.55` and start the TTS container first (it has a fixed footprint) so vLLM can size its KV cache to whatever's left.
+> **Sharing a GPU with TTS?**  
+> Start TTS first (fixed ~4.4 GB footprint), then ASR with `--gpu-memory-utilization 0.55`.  
+> vLLM auto-sizes its KV cache to whatever VRAM is left.  
+> See `docker-compose.yml` for the full orchestrated setup.
 
 ---
 
@@ -59,25 +76,49 @@ git clone https://github.com/malaiwah/qwen3-asr-server.git
 cd qwen3-asr-server
 uv venv && source .venv/bin/activate
 
-# GPU (production) — vLLM-backed:
-uv pip install -e ".[gpu,test]"
-qwen-asr-serve Qwen/Qwen3-ASR-1.7B --host 0.0.0.0 --port 8002 --kv-cache-dtype fp8
+# GPU (vLLM-backed, production):
+uv pip install -e ".[gpu]"
+python server.py --host 0.0.0.0 --port 8002 \
+  --gpu-memory-utilization 0.65 \
+  --max-model-len 4096 \
+  --kv-cache-dtype fp8
 
-# CPU fallback (slow, for smoke tests only):
-uv pip install -e ".[cpu,test]"
+# CPU fallback (transformers, slow):
+uv pip install -e ".[cpu]"
 python server.py --cpu --port 8002
 
 # In another shell:
 ./test-asr.py my-recording.wav
 ./test-asr.py my-recording.wav --language English
-./test-asr.py my-recording.wav --context "Hermes Agent, Honcho memory, oikos host"
+./test-asr.py my-recording.wav --context "Hermes Agent, Honcho memory, oikos"
+```
+
+> **Note on GPU install**: vLLM may require `nvcc` (CUDA toolkit) to install.  
+> On Ubuntu: `sudo apt-get install -y nvidia-cuda-toolkit` before `uv pip install -e ".[gpu]"`.
+
+---
+
+## OpenAI / Whisper SDK drop-in
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="not-needed",
+    base_url="http://localhost:8002/v1",
+)
+
+with open("audio.wav", "rb") as f:
+    transcript = client.audio.transcriptions.create(
+        model="Qwen/Qwen3-ASR-1.7B",
+        file=f,
+    )
+print(transcript.text)  # Clean output — no "language English\n" prefix
 ```
 
 ---
 
 ## Round-trip with qwen3-tts-server
-
-The two servers compose naturally — generate speech with one, transcribe it back with the other:
 
 ```mermaid
 flowchart LR
@@ -97,11 +138,17 @@ flowchart LR
 # → "The quick brown fox jumps over the lazy dog."
 ```
 
+To run both services with a single command:
+```bash
+HF_TOKEN=hf_xxx docker compose up -d
+```
+See [`docker-compose.yml`](docker-compose.yml) for VRAM budget, startup ordering, and health checks.
+
 ---
 
 ## Hardware reference (tested)
 
-The numbers below come from a single GPU host nicknamed **Creativity**, running both this server **and** [qwen3-tts-server](https://github.com/malaiwah/qwen3-tts-server) on the same card:
+### Primary (benchmarks below)
 
 | Component | Spec |
 |---|---|
@@ -111,30 +158,42 @@ The numbers below come from a single GPU host nicknamed **Creativity**, running 
 | **OS** | Ubuntu 24.04.4 LTS |
 | **Driver** | NVIDIA 595.58.03 (CUDA 13.x) |
 
-### VRAM budget (when sharing with TTS)
+### Also validated on
+
+| GPU | VRAM | Notes |
+|-----|------|-------|
+| NVIDIA GRID A100D-20C (Vultr vGPU) | 20 GB | Use `--gpu-memory-utilization 0.55` when co-located with TTS |
+
+### VRAM budget (16 GB, TTS + ASR on same GPU)
 
 ```
 RTX 4080 SUPER:                       16,376 MiB
-  TTS model (bfloat16 + flash-attn):   4,400 MiB  (qwen3-tts-server)
-  ASR model + fp8 KV + cudagraphs:    10,400 MiB  (this server)
+  TTS (bfloat16 + CUDA graphs):        4,400 MiB  (qwen3-tts-server)
+  ASR (fp8 KV + vLLM):                10,400 MiB  (this server, --gpu-mem-util 0.55)
     - Model weights:                   3,870 MiB
-    - KV cache (fp8, 95,968 tokens):   5,130 MiB
+    - KV cache (fp8):                  5,130 MiB
     - CUDA graphs + overhead:          1,400 MiB
-  Total utilisation:                   ~90%
+  Total:                              ~14,800 MiB / ~90%
 ```
 
-**Order matters**: start TTS first (fixed footprint), then ASR — vLLM
-auto-sizes its KV cache to whatever VRAM remains.
+**Start order matters**: TTS first (fixed footprint), then ASR — vLLM auto-sizes KV cache.
 
-### Performance (RTF)
+### Performance (RTX 4080 SUPER, vLLM + fp8)
 
 | Workload | Wall time |
 |---|---|
-| Short clip (5 s mono WAV) | ~250 ms |
-| Long clip (30 s mono WAV) | ~600 ms |
-| Context-primed (`/v1/chat/completions`) | ~+50 ms vs plain transcription |
+| 5 s mono WAV | ~250 ms |
+| 30 s mono WAV | ~600 ms |
+| Context-primed (`/v1/chat/completions`) | ~+50 ms overhead |
 
-Throughput scales with `--max-num-seqs`; defaults are tuned for 1–4 concurrent requests.
+### Performance (GRID A100D-20C vGPU)
+
+| Workload | Wall time |
+|---|---|
+| 5 s mono WAV | ~400 ms |
+| 30 s mono WAV | ~900 ms |
+
+The vGPU adds hypervisor overhead; absolute latency is higher but RTF is still excellent.
 
 ---
 
@@ -146,7 +205,8 @@ Throughput scales with `--max-num-seqs`; defaults are tuned for 1–4 concurrent
 curl -X POST http://localhost:8002/v1/audio/transcriptions \
   -F model=Qwen/Qwen3-ASR-1.7B \
   -F file=@audio.wav \
-  -F language=en       # optional ISO-639-1 hint
+  -F language=en          # optional ISO-639-1 hint
+  -F response_format=json # json | text | verbose_json | srt | vtt
 ```
 
 Response:
@@ -154,31 +214,34 @@ Response:
 { "text": "Hello from Qwen3." }
 ```
 
-### `POST /v1/chat/completions` — context-primed (vocabulary biasing)
+The `language X\n` prefix that Qwen3-ASR internally prepends is always stripped.
 
-Bias the recognition with a system prompt — useful for domain-specific
-terms, named entities, code identifiers, or multilingual speakers:
+### `POST /v1/audio/translations` — API compatibility shim
 
-```bash
-curl -X POST http://localhost:8002/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-ASR-1.7B",
-    "messages": [
-      {"role": "system", "content": "The speaker uses English and French. They may say: Hermes Agent, Honcho, oikos, malaiwah."},
-      {"role": "user", "content": [
-        {"type": "input_audio", "input_audio": {"data": "<base64 audio>", "format": "wav"}}
-      ]},
-    ],
-    "temperature": 0.0
-  }'
+Same interface as `/v1/audio/transcriptions`.  **Note**: Qwen3-ASR does not translate to English — it transcribes in the detected language.  The response includes a `_note` field explaining this.  For actual translation, pass the transcript to a downstream LLM.
+
+### `POST /v1/chat/completions` — context-primed transcription
+
+Bias vocabulary, language, or named entities with a system prompt:
+
+```json
+{
+  "model": "Qwen/Qwen3-ASR-1.7B",
+  "messages": [
+    {"role": "system", "content": "Speaker uses English/French. May say: Hermes, Honcho, oikos, malaiwah."},
+    {"role": "user", "content": [
+      {"type": "input_audio", "input_audio": {"data": "<base64>", "format": "wav"}}
+    ]}
+  ],
+  "temperature": 0.0
+}
 ```
 
-Returns a standard chat completion with the transcription in `choices[0].message.content`. The JSON response also includes the detected language in the response payload (when supported by the model).
+Returns standard chat completion JSON.  Requires GPU / vLLM backend.
 
-### `GET /v1/models`, `GET /health`
+### `GET /health`, `GET /v1/models`
 
-Standard introspection.
+Standard introspection.  `/health` reflects actual vLLM readiness.
 
 ---
 
@@ -187,64 +250,55 @@ Standard introspection.
 | Env var | Default | Purpose |
 |---|---|---|
 | `QWEN3_ASR_MODEL_ID` | `Qwen/Qwen3-ASR-1.7B` | Override the HF model |
-| `HF_HOME` | `/root/.cache/huggingface` | Where weights are cached. **Mount a volume here.** |
-| `HF_TOKEN` | *(unset)* | Optional — only needed if you've gated downloads on your account |
+| `HF_HOME` | `/root/.cache/huggingface` | Weight cache. **Mount a volume here.** |
+| `HF_TOKEN` | *(unset)* | HuggingFace token for gated downloads |
 
-CLI flags (default GPU/vLLM entrypoint — these forward to `qwen-asr-serve`):
+CLI flags (forwarded to vLLM in GPU mode):
 
 | Flag | Default | Purpose |
 |---|---|---|
 | `--host` / `--port` | `0.0.0.0` / `8000` | Listener |
-| `--gpu-memory-utilization` | `0.9` | Lower this when sharing the GPU |
+| `--gpu-memory-utilization` | `0.9` | **Lower to 0.55** when sharing GPU with TTS |
 | `--max-model-len` | `4096` | Context window |
-| `--max-num-seqs` | (vLLM default) | Concurrent requests during cudagraph capture |
-| `--kv-cache-dtype` | `fp8` | KV cache dtype — fp8 saves ~2× VRAM |
-
-When invoking `python server.py --cpu` instead, the script runs a
-transformers-based fallback that exposes a minimal subset of the API
-(`/v1/audio/transcriptions` + `/health` + `/v1/models`).
+| `--kv-cache-dtype` | *(vLLM default)* | `fp8` recommended — halves KV VRAM |
+| `--max-num-seqs` | *(vLLM default)* | Concurrent requests |
+| `--cpu` | *(off)* | Force transformers fallback (very slow) |
 
 ---
 
 ## Building from source
 
 ```bash
-podman build -t qwen3-asr-server:latest -f Containerfile .
+docker build -t qwen3-asr-server:latest -f Containerfile .
 ```
 
-The CI workflow in `.github/workflows/build.yml` builds and pushes
-to `ghcr.io/<owner>/qwen3-asr-server:latest` on every push to `main`
-plus version tags.
+CI builds and pushes to `ghcr.io/malaiwah/qwen3-asr-server:latest` on every push to `main`.
 
 ---
 
 ## Tests
-
-Smoke tests don't require a GPU or a model load:
 
 ```bash
 uv pip install -e ".[test]"
 pytest -q
 ```
 
+Smoke tests run without a GPU or model load.
+
 ---
 
-## CPU mode warning
+## CPU mode
 
-The CPU fallback uses plain `transformers` (no vLLM) and is **orders of
-magnitude slower** than the GPU path. Use it only for:
+CPU inference is **orders of magnitude slower** (multi-second per short clip).
+Use only for smoke tests, API surface exploration, or environments without a GPU.
 
-- environments without an NVIDIA GPU
-- smoke tests / CI
-- demonstrating the API surface
-
-For real conversational use, a CUDA GPU with ≥ 6 GB VRAM is strongly recommended.
+For production use, a CUDA GPU with ≥ 6 GB VRAM is required.
 
 ---
 
 ## Acknowledgements
 
-- [Qwen team @ Alibaba](https://huggingface.co/Qwen) for the [Qwen3-ASR-1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) model
+- [Qwen team @ Alibaba](https://huggingface.co/Qwen) for [Qwen3-ASR-1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B)
 - [vLLM](https://github.com/vllm-project/vllm) for the inference engine
 - [`qwen-asr`](https://pypi.org/project/qwen-asr/) for the upstream serving CLI
 
@@ -252,4 +306,4 @@ For real conversational use, a CUDA GPU with ≥ 6 GB VRAM is strongly recommend
 
 ## License
 
-[MIT](LICENSE) — free for any use; please credit the upstream Qwen model card and follow its license terms separately.
+[MIT](LICENSE)

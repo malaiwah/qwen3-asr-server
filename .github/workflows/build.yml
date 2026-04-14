@@ -13,8 +13,31 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # ------------------------------------------------------------------
+  # Smoke tests (no GPU, no model load) — run on every push/PR
+  # ------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies (no GPU needed)
+        run: |
+          pip install fastapi uvicorn soundfile numpy httpx pytest
+
+      - name: Run smoke tests
+        run: pytest -q tests/
+
+  # ------------------------------------------------------------------
+  # Container build + push to GHCR
+  # ------------------------------------------------------------------
   build:
     runs-on: ubuntu-latest
+    needs: test
     permissions:
       contents: read
       packages: write
@@ -48,7 +71,9 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
+            # Explicit latest tag on main — avoids docker/metadata-action
+            # template evaluation bugs with {{is_default_branch}}.
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
