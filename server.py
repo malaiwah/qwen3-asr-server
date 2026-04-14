@@ -338,8 +338,12 @@ async def transcribe(request: Request):
         raise HTTPException(503, "Model is still loading. Check /health and retry.")
 
     if _DEVICE != "cpu":
-        # Peek at response_format before proxying.  Starlette caches the body
-        # after the first read, so request.body() inside _proxy still works.
+        # Prime the body cache FIRST.  request.form() reads via stream() which
+        # marks the stream consumed; a subsequent request.body() in _proxy would
+        # then raise RuntimeError("Stream consumed").  Calling request.body()
+        # first caches the raw bytes in request._body; stream() thereafter
+        # yields from that cache, so both form() and _proxy work correctly.
+        await request.body()
         form = await request.form()
         response_format = (form.get("response_format") or "json").lower()
 
